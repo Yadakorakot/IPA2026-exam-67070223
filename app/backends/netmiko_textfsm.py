@@ -173,13 +173,16 @@ def delete_interface(
     """Delete an interface using Netmiko."""
 
     try:
-        # สำหรับ Public Tests ใช้ Fake Delete Function
+        # Public Tests ใช้ Fake Function ตามเดิม
         if netmiko_delete is not None:
             result = netmiko_delete(router, interface_name)
 
         else:
-            # ตรวจสถานะก่อนลบ
-            before = get_interface_state(router, interface_name)
+            # ใช้ RESTCONF ตรวจสถานะก่อนและหลังลบ
+            # ลดปัญหาการ Parse TextFSM จาก Router จริง
+            from app.backends.restconf import get_interface_state as check_state
+
+            before = check_state(router, interface_name)
 
             if before["status"] == "error":
                 return before
@@ -191,16 +194,15 @@ def delete_interface(
                     "interface": None
                 }
 
-            # เชื่อม Router จริง
+            # เชื่อม Router ผ่าน SSH
             connection = connect_router(router)
 
             try:
-                # ส่งคำสั่งลบ Loopback
                 output = connection.send_config_set(
                     [f"no interface {interface_name}"]
                 )
 
-                # ตรวจว่าคำสั่งถูกปฏิเสธหรือไม่
+                # ตรวจสอบคำสั่งที่ Router ปฏิเสธ
                 if any(word in output.lower() for word in (
                     "% invalid",
                     "% error",
@@ -208,25 +210,30 @@ def delete_interface(
                     "% ambiguous"
                 )):
                     raise RuntimeError("Delete command failed")
+
             finally:
                 connection.disconnect()
 
-            # ตรวจสถานะหลังลบ
-            after = get_interface_state(router, interface_name)
+            # ตรวจว่าลบสำเร็จจริงด้วย RESTCONF
+            after = check_state(router, interface_name)
 
             if after["status"] == "error":
                 return after
 
             if after["result"] != "not_found":
-                raise RuntimeError("Interface still exists")
+                return {
+                    "status": "error",
+                    "result": "backend_failed"
+                }
 
             result = "deleted"
 
-        # ลบสำเร็จ
         if result == "deleted":
-            return {"status": "ok", "result": "deleted"}
+            return {
+                "status": "ok",
+                "result": "deleted"
+            }
 
-        # Interface ไม่มีอยู่แล้ว
         if result == "not_found":
             return {
                 "status": "ok",
@@ -234,7 +241,10 @@ def delete_interface(
                 "interface": None
             }
 
-        return {"status": "error", "result": "backend_failed"}
+        return {
+            "status": "error",
+            "result": "backend_failed"
+        }
 
     except Exception as exc:
         return backend_error(exc)

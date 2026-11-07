@@ -31,9 +31,11 @@ def get_interface_state(
                     os.getenv("ROUTER_USER", ""),
                     os.getenv("ROUTER_PASS", "")
                 ),
-                headers={"Accept": "application/yang-data+json"},
+                headers={
+                    "Accept": "application/yang-data+json"
+                },
                 timeout=10,
-                verify=True
+                verify=False  # ใช้กับ Router Lab เท่านั้น
             )
 
         # ไม่พบ Interface
@@ -51,6 +53,7 @@ def get_interface_state(
                 "result": "authentication_failed"
             }
 
+        # HTTP Status อื่นที่ไม่สำเร็จ
         if response.status_code != 200:
             return {
                 "status": "error",
@@ -66,7 +69,9 @@ def get_interface_state(
         ip = address["ip"]
         mask = address["netmask"]
 
-        prefix = IPv4Network(f"0.0.0.0/{mask}").prefixlen
+        prefix = IPv4Network(
+            f"0.0.0.0/{mask}"
+        ).prefixlen
 
         # แปลงข้อมูลเป็นรูปแบบมาตรฐาน
         return {
@@ -83,15 +88,27 @@ def get_interface_state(
         }
 
     except PermissionError:
-        return {"status": "error", "result": "authentication_failed"}
+        return {
+            "status": "error",
+            "result": "authentication_failed"
+        }
 
-    except (ConnectionError, requests.exceptions.ConnectionError,
-            requests.exceptions.Timeout,
-            requests.exceptions.SSLError):
-        return {"status": "error", "result": "connection_failed"}
+    except (
+        ConnectionError,
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        requests.exceptions.SSLError
+    ):
+        return {
+            "status": "error",
+            "result": "connection_failed"
+        }
 
     except Exception:
-        return {"status": "error", "result": "backend_failed"}
+        return {
+            "status": "error",
+            "result": "backend_failed"
+        }
 
 
 def plan_interface(
@@ -119,7 +136,10 @@ def plan_interface(
         current_interface = response["interface"]
 
     # ใช้ Planner จาก Part 2
-    return build_plan(desired_interface, current_interface)
+    return build_plan(
+        desired_interface,
+        current_interface
+    )
 
 
 def apply_interface(
@@ -135,7 +155,10 @@ def apply_interface(
         number = int(name[len("Loopback"):])
 
         # แปลง IP/CIDR เป็น IP และ Netmask
-        ipv4 = IPv4Interface(desired_interface["ipv4"])
+        ipv4 = IPv4Interface(
+            desired_interface["ipv4"]
+        )
+
         ip = str(ipv4.ip)
         mask = str(ipv4.network.netmask)
 
@@ -169,7 +192,10 @@ def apply_interface(
 
         if http_put is not None:
             # ใช้ HTTP จำลองสำหรับ Tests
-            response = http_put(url, json=payload)
+            response = http_put(
+                url,
+                json=payload
+            )
         else:
             # ส่ง PUT ไป Router จริง
             response = requests.put(
@@ -184,12 +210,15 @@ def apply_interface(
                     "Content-Type": "application/yang-data+json"
                 },
                 timeout=10,
-                verify=True
+                verify=False  # ใช้กับ Router Lab เท่านั้น
             )
 
         # HTTP Success
         if response.status_code in (200, 201, 204):
-            return {"status": "ok", "result": "applied"}
+            return {
+                "status": "ok",
+                "result": "applied"
+            }
 
         if response.status_code in (401, 403):
             return {
@@ -197,15 +226,30 @@ def apply_interface(
                 "result": "authentication_failed"
             }
 
-        return {"status": "error", "result": "backend_failed"}
+        return {
+            "status": "error",
+            "result": "backend_failed"
+        }
 
     except PermissionError:
-        return {"status": "error", "result": "authentication_failed"}
+        return {
+            "status": "error",
+            "result": "authentication_failed"
+        }
 
-    except (ConnectionError, requests.exceptions.ConnectionError,
-            requests.exceptions.Timeout,
-            requests.exceptions.SSLError):
-        return {"status": "error", "result": "connection_failed"}
+    except (
+        ConnectionError,
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        requests.exceptions.SSLError
+    ):
+        return {
+            "status": "error",
+            "result": "connection_failed"
+        }
 
     except Exception:
-        return {"status": "error", "result": "backend_failed"}
+        return {
+            "status": "error",
+            "result": "backend_failed"
+        }
