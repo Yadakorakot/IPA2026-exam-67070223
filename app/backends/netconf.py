@@ -1,34 +1,58 @@
 
+"""NETCONF interface backend."""
+
 import os
 import xml.etree.ElementTree as ET
+
 from ipaddress import IPv4Interface, IPv4Network
 from app.planner import build_plan
 
+
+# Namespace ของ YANG Models
 IETF = "urn:ietf:params:xml:ns:yang:ietf-interfaces"
 IETF_IP = "urn:ietf:params:xml:ns:yang:ietf-ip"
 NATIVE = "http://cisco.com/ns/yang/Cisco-IOS-XE-native"
 NETCONF = "urn:ietf:params:xml:ns:netconf:base:1.0"
 
 
-# แปลง Exception เป็น Error ตาม Spec
 def backend_error(exc):
-    name = type(exc).__name__
+    """Convert NETCONF exceptions to standardized errors."""
 
-    if isinstance(exc, PermissionError) or "Authentication" in name:
+    name = type(exc).__name__.lower()
+
+    # ข้อผิดพลาดเกี่ยวกับ Username/Password
+    if (
+        isinstance(exc, PermissionError)
+        or "authentication" in name
+        or "autherror" in name
+    ):
         result = "authentication_failed"
-    elif isinstance(exc, (ConnectionError, TimeoutError)) or name in (
-        "SSHError", "SessionCloseError", "TransportError",
-        "SocketError", "TimeoutError"
+
+    # ข้อผิดพลาดเกี่ยวกับ Network/SSH
+    elif (
+        isinstance(exc, (ConnectionError, TimeoutError, OSError))
+        or "timeout" in name
+        or "connection" in name
+        or "ssherror" in name
+        or "transporterror" in name
+        or "sessionclose" in name
+        or "socketerror" in name
     ):
         result = "connection_failed"
+
+    # ข้อผิดพลาดอื่นจาก NETCONF
     else:
         result = "backend_failed"
 
-    return {"status": "error", "result": result}
+    return {
+        "status": "error",
+        "result": result
+    }
 
 
-# ติดต่อ Router ผ่าน NETCONF จริง
 def connect_router(router):
+    """Connect to Cisco IOS XE using NETCONF over SSH."""
+
     from ncclient import manager
 
     return manager.connect(
@@ -51,37 +75,68 @@ def get_interface_state(
     """Return normalized interface status using NETCONF."""
 
     try:
-        # สร้าง XML Filter สำหรับอ่าน Interface
-        root = ET.Element(f"{{{IETF}}}interfaces")
-        interface = ET.SubElement(root, f"{{{IETF}}}interface")
-        ET.SubElement(interface, f"{{{IETF}}}name").text = interface_name
+        # สร้าง XML Filter เพื่ออ่าน Interface ที่ต้องการ
+        root = ET.Element(
+            f"{{{IETF}}}interfaces"
+        )
 
-        filter_xml = ET.tostring(root, encoding="unicode")
+        interface = ET.SubElement(
+            root,
+            f"{{{IETF}}}interface"
+        )
 
+        ET.SubElement(
+            interface,
+            f"{{{IETF}}}name"
+        ).text = interface_name
+
+        filter_xml = ET.tostring(
+            root,
+            encoding="unicode"
+        )
+
+        # ใช้ Fake Function สำหรับ Public Tests
         if netconf_get_config is not None:
-            # ใช้ฟังก์ชันจำลองสำหรับ Tests
-            xml_data = netconf_get_config(router, filter_xml)
+            xml_data = netconf_get_config(
+                router,
+                filter_xml
+            )
+
         else:
-            # อ่าน running configuration จาก Router จริง
+            # ติดต่อ Router จริงผ่าน NETCONF Port 830
             with connect_router(router) as connection:
                 reply = connection.get_config(
                     source="running",
                     filter=("subtree", filter_xml)
                 )
+
                 xml_data = reply.data_xml
 
         # แปลง XML เป็น Element
         xml_root = ET.fromstring(xml_data)
 
-        ns = {"if": IETF, "ip": IETF_IP}
+        namespaces = {
+            "if": IETF,
+            "ip": IETF_IP
+        }
 
-        # ค้นหา Interface ที่ต้องการ
+        # ค้นหา Interface ที่ชื่อตรงกัน
         found = None
-        for item in xml_root.findall(".//if:interface", ns):
-            if item.findtext("if:name", namespaces=ns) == interface_name:
+
+        for item in xml_root.findall(
+            ".//if:interface",
+            namespaces
+        ):
+            name = item.findtext(
+                "if:name",
+                namespaces=namespaces
+            )
+
+            if name == interface_name:
                 found = item
                 break
 
+        # ถ้าไม่มี Interface
         if found is None:
             return {
                 "status": "ok",
@@ -89,33 +144,63 @@ def get_interface_state(
                 "interface": None
             }
 
-        # ดึงข้อมูล Interface
-        name = found.findtext("if:name", namespaces=ns)
+        # อ่านชื่อ
+        name = found.findtext(
+            "if:name",
+            namespaces=namespaces
+        )
+
+        # อ่าน Description
         description = found.findtext(
-            "if:description", namespaces=ns
+            "if:description",
+            namespaces=namespaces
         )
-        enabled = found.findtext("if:enabled", namespaces=ns)
 
+        # อ่านสถานะ Enabled
+        enabled = found.findtext(
+            "if:enabled",
+            namespaces=namespaces
+        )
+
+        # อ่าน IPv4 Address
         ip = found.findtext(
-            "ip:ipv4/ip:address/ip:ip", namespaces=ns
+            "ip:ipv4/ip:address/ip:ip",
+            namespaces=namespaces
         )
+
+        # อ่าน Netmask
         mask = found.findtext(
-            "ip:ipv4/ip:address/ip:netmask", namespaces=ns
+            "ip:ipv4/ip:address/ip:netmask",
+            namespaces=namespaces
         )
 
-        # แปลง Netmask เป็น Prefix เช่น /32
-        prefix = IPv4Network(f"0.0.0.0/{mask}").prefixlen
+        # รองรับ Interface ที่ยังไม่มี IPv4
+        ipv4 = None
 
+        if ip and mask:
+            prefix = IPv4Network(
+                f"0.0.0.0/{mask}"
+            ).prefixlen
+
+            ipv4 = f"{ip}/{prefix}"
+
+        # หาก enabled ไม่ระบุ ให้ใช้ค่า Default เป็น up
+        admin_state = (
+            "down"
+            if enabled is not None
+            and enabled.strip().lower() == "false"
+            else "up"
+        )
+
+        # คืนข้อมูลมาตรฐาน
         return {
             "status": "ok",
             "result": "found",
             "interface": {
                 "name": name,
-                "ipv4": f"{ip}/{prefix}",
+                "ipv4": ipv4,
                 "description": description,
-                "admin_state": (
-                    "down" if enabled == "false" else "up"
-                )
+                "admin_state": admin_state
             }
         }
 
@@ -130,21 +215,24 @@ def plan_interface(
 ):
     """Return create/update/no_change plan using NETCONF status."""
 
-    # อ่านสถานะปัจจุบันจาก NETCONF
+    # อ่านสถานะปัจจุบันจาก Router
     response = get_interface_state(
         router,
         desired_interface["name"],
         netconf_get_config=netconf_get_config
     )
 
-    # ถ้าอ่าน Router ไม่สำเร็จ ส่ง Error กลับ
+    # ถ้า Backend มี Error ให้ส่งกลับทันที
     if response["status"] == "error":
         return response
 
-    # ใช้ Planner ที่ทำไว้ใน Part 2
+    # ถ้า Interface ไม่มีอยู่ จะเป็น None
+    current_interface = response["interface"]
+
+    # เรียก Planner จาก Part 2
     return build_plan(
         desired_interface,
-        response["interface"]
+        current_interface
     )
 
 
@@ -156,60 +244,101 @@ def apply_interface(
     """Apply complete desired interface state using NETCONF."""
 
     try:
-        # แยกชื่อ Loopback และ IPv4
-        number = desired_interface["name"].replace("Loopback", "", 1)
-        ipv4 = IPv4Interface(desired_interface["ipv4"])
+        # แยกหมายเลข Loopback
+        name = desired_interface["name"]
+        number = name.replace("Loopback", "", 1)
+
+        # แปลง IPv4/CIDR
+        ipv4 = IPv4Interface(
+            desired_interface["ipv4"]
+        )
 
         ip = str(ipv4.ip)
         mask = str(ipv4.network.netmask)
 
-        # สร้าง NETCONF XML
-        config = ET.Element(f"{{{NETCONF}}}config")
-        native = ET.SubElement(config, f"{{{NATIVE}}}native")
-        interface = ET.SubElement(native, f"{{{NATIVE}}}interface")
+        # สร้าง NETCONF Config XML
+        config = ET.Element(
+            f"{{{NETCONF}}}config"
+        )
+
+        native = ET.SubElement(
+            config,
+            f"{{{NATIVE}}}native"
+        )
+
+        interface = ET.SubElement(
+            native,
+            f"{{{NATIVE}}}interface"
+        )
+
         loopback = ET.SubElement(
             interface,
             f"{{{NATIVE}}}Loopback"
         )
 
-        # ใช้ replace เพื่อแทนค่าทั้ง Interface
-        loopback.set(f"{{{NETCONF}}}operation", "replace")
+        # Replace เพื่อให้ค่าตรง Desired State
+        loopback.set(
+            f"{{{NETCONF}}}operation",
+            "replace"
+        )
 
+        # หมายเลข Loopback
         ET.SubElement(
-            loopback, f"{{{NATIVE}}}name"
+            loopback,
+            f"{{{NATIVE}}}name"
         ).text = number
 
+        # Description
         ET.SubElement(
-            loopback, f"{{{NATIVE}}}description"
+            loopback,
+            f"{{{NATIVE}}}description"
         ).text = desired_interface["description"]
 
+        # ตั้งค่า IPv4
         ip_element = ET.SubElement(
-            loopback, f"{{{NATIVE}}}ip"
+            loopback,
+            f"{{{NATIVE}}}ip"
         )
+
         address = ET.SubElement(
-            ip_element, f"{{{NATIVE}}}address"
+            ip_element,
+            f"{{{NATIVE}}}address"
         )
+
         primary = ET.SubElement(
-            address, f"{{{NATIVE}}}primary"
+            address,
+            f"{{{NATIVE}}}primary"
         )
 
         ET.SubElement(
-            primary, f"{{{NATIVE}}}address"
+            primary,
+            f"{{{NATIVE}}}address"
         ).text = ip
 
         ET.SubElement(
-            primary, f"{{{NATIVE}}}mask"
+            primary,
+            f"{{{NATIVE}}}mask"
         ).text = mask
 
-        # ถ้า admin_state เป็น down ให้ shutdown
+        # down = shutdown / up = no shutdown
         if desired_interface["admin_state"] == "down":
-            ET.SubElement(loopback, f"{{{NATIVE}}}shutdown")
+            ET.SubElement(
+                loopback,
+                f"{{{NATIVE}}}shutdown"
+            )
 
-        config_xml = ET.tostring(config, encoding="unicode")
+        config_xml = ET.tostring(
+            config,
+            encoding="unicode"
+        )
 
+        # ใช้ Fake Function สำหรับ Tests
         if netconf_edit_config is not None:
-            # ใช้ฟังก์ชันจำลองสำหรับ Tests
-            netconf_edit_config(router, config_xml)
+            netconf_edit_config(
+                router,
+                config_xml
+            )
+
         else:
             # ส่ง edit-config ไป Router จริง
             with connect_router(router) as connection:
@@ -217,10 +346,16 @@ def apply_interface(
                     target="running",
                     config=config_xml
                 )
-                if not reply.ok:
-                    raise RuntimeError("NETCONF edit-config failed")
 
-        return {"status": "ok", "result": "applied"}
+                if not reply.ok:
+                    raise RuntimeError(
+                        "NETCONF edit-config failed"
+                    )
+
+        return {
+            "status": "ok",
+            "result": "applied"
+        }
 
     except Exception as exc:
         return backend_error(exc)
