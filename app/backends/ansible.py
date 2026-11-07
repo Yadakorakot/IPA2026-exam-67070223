@@ -1,29 +1,30 @@
-
-"""Apply interface configuration using Ansible."""
+"""Apply Cisco IOS Loopback configuration using Ansible."""
 
 import json
 import os
 import subprocess
 import tempfile
 
-from pathlib import Path
 from ipaddress import IPv4Interface
+from pathlib import Path
 
 
 ANSIBLE_DIR = Path(__file__).resolve().parents[2] / "ansible"
 
 
 def apply_interface(router, desired_interface, run_playbook=None):
-    """Apply complete desired interface state using Ansible."""
+    """Apply a desired interface state, preserving the test runner hook."""
 
     try:
-        ipv4 = IPv4Interface(desired_interface["ipv4"])
+        # แปลง IPv4/CIDR เป็น IP และ Netmask
+        address = IPv4Interface(desired_interface["ipv4"])
 
+        # เตรียมข้อมูลส่งไป Ansible
         variables = {
             "router": router,
             "interface_name": desired_interface["name"],
-            "ipv4_address": str(ipv4.ip),
-            "netmask": str(ipv4.network.netmask),
+            "ipv4_address": str(address.ip),
+            "netmask": str(address.network.netmask),
             "description": desired_interface["description"],
             "shutdown": desired_interface["admin_state"] == "down",
         }
@@ -33,44 +34,49 @@ def apply_interface(router, desired_interface, run_playbook=None):
             run_playbook(variables)
 
         else:
-            playbook = ANSIBLE_DIR / "apply_interface.yml"
-            base_inventory = ANSIBLE_DIR / "inventory.ini"
-
-            with tempfile.TemporaryDirectory() as temp_dir:
-                inventory = Path(temp_dir) / "inventory.ini"
+            # สร้าง Inventory ชั่วคราวสำหรับ Router เป้าหมาย
+            with tempfile.TemporaryDirectory() as directory:
+                inventory = Path(directory) / "target.ini"
 
                 inventory.write_text(
                     f"[routers]\ntarget ansible_host={router}\n",
-                    encoding="utf-8"
+                    encoding="utf-8",
                 )
 
+                # Environment สำหรับ Ansible
                 env = {
                     **os.environ,
                     "ANSIBLE_HOST_KEY_CHECKING": "False",
                     "ANSIBLE_NOCOLOR": "1",
                 }
 
+                # เรียก Ansible Playbook
                 result = subprocess.run(
                     [
                         "ansible-playbook",
-                        "-i", str(inventory),
-                        "-i", str(base_inventory),
-                        str(playbook),
-                        "--extra-vars", json.dumps(variables),
+                        "-i",
+                        str(inventory),
+                        "-i",
+                        str(ANSIBLE_DIR / "inventory.ini"),
+                        str(ANSIBLE_DIR / "apply_interface.yml"),
+                        "--extra-vars",
+                        json.dumps(variables),
                     ],
                     capture_output=True,
                     text=True,
-                    timeout=90,
+                    timeout=18,
                     env=env,
                 )
 
+                # ตรวจ Error จาก Ansible
                 if result.returncode != 0:
                     output = (
                         (result.stdout or "")
                         + (result.stderr or "")
                     ).lower()
 
-                    if any(word in output for word in (
+                    # Authentication Error
+                    if any(s in output for s in (
                         "authentication failed",
                         "authentication failure",
                         "permission denied",
@@ -80,7 +86,8 @@ def apply_interface(router, desired_interface, run_playbook=None):
                             "Ansible authentication failed"
                         )
 
-                    if any(word in output for word in (
+                    # Connection Error
+                    if any(s in output for s in (
                         "unreachable",
                         "connection refused",
                         "timed out",
